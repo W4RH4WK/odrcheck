@@ -1,0 +1,176 @@
+#!/usr/bin/env ruby
+
+require 'open3'
+require 'ostruct'
+require 'pathname'
+
+LLVM_DWARFDUMP = ENV["LLVM_DWARFDUMP"] || "llvm-dwarfdump"
+
+# Runs the given string (or array of strings) and returns stdout. Raises on
+# failure.
+# :echo        print cmd to stdout
+# :print_err   print error to stderr instead of raising a RuntimeError
+# :ignore_err  neither raise nor print an error
+# stdin:''     data provided to stdin
+# env:{}       mapping for environment variables
+def run(cmd, *args, **kwargs)
+  cmd = cmd.join(' ') if cmd.kind_of?(Array)
+  puts cmd if args.include?(:echo)
+  env = kwargs.fetch(:env, {})
+  stdout, stderr, status = Open3.capture3(env, cmd, :stdin_data=>kwargs.fetch(:stdin, ''))
+  if !status.success? and !args.include?(:ignore_err)
+    error = "Command failed #{status}\n#{cmd}\n--- stderr ---\n#{stderr}\n--- stdout ---\n#{stdout}\n"
+    if args.include?(:print_err)
+      STDERR.puts error
+    else
+      raise RuntimeError.new(error)
+    end
+  end
+  stdout
+end
+
+# Parses the output of llvm-dwarfdump --debug-info and returns a hash
+# representing the tree.
+def parse_debug_dump(text)
+  node_stack = [ {tag: "root", children: []} ]
+  cur_indent = 0
+  text.lines.each do |line|
+    # DW_TAG starts a new node
+    if line =~ /^((0x\h+:)?\s+)DW_TAG_(\w+)/
+      node = {tag: $3, children: []}
+
+      # indentation determines the nesting level
+      indent = $1.size
+      if indent == cur_indent
+        node_stack.pop
+      elsif indent < cur_indent
+        node_stack.pop 2
+      end
+      node_stack.last[:children].push(node)
+      node_stack.push(node)
+      cur_indent = indent
+
+    # DW_AT adds a new attribute to the current node
+    elsif line =~ /^(\s+)DW_AT_(\w+)\s*\((.*)\)/
+      raise "invalid indent" if $1.size <= cur_indent
+      attr = $2
+      value = $3
+      if attr == 'type'
+        value = value.match(/0x\h+ "(.*)"/)[1]
+      elsif value.chars.first == '"' && value.chars.last == '"'
+        value = value[1,value.size-2]
+      end
+      node_stack.last[attr] = value
+    end
+  end
+
+  # strip away root node if there's only one top-level node
+  if node_stack.first[:children].size == 1
+    return node_stack.first[:children][0]
+  else
+    return node_stack.first
+  end
+end
+
+# Traverses the tree obtained from parse_debug_dump and returns a list of type
+# definitions.
+def extract_types(node, objfilepath, cur=nil)
+  def make_sloc(node)
+    file = node["decl_file"]
+    line = node["decl_line"]
+    raise "missing sloc" if !file || !line
+    file.gsub!('\\', '/')
+    "#{Pathname(file).cleanpath}:#{line}"
+  end
+
+  types = []
+  if node[:tag] == "structure_type" || node[:tag] == "class_type"
+    if node["name"] && node["decl_file"] && node["declaration"] != "true"
+      cur = OpenStruct.new(
+        name: node["name"],
+        size: Integer(node["byte_size"]),
+        sloc: make_sloc(node),
+        objfile: objfilepath,
+        members: [],
+      )
+      types << cur
+    end
+  elsif node[:tag] == "member"
+    if node["name"] && node["decl_file"] && node["data_member_location"]
+      cur.members << OpenStruct.new(
+        name: node["name"],
+        type: node["type"],
+        offset: Integer(node["data_member_location"]),
+        sloc: make_sloc(node),
+      )
+    end
+  end
+  types + node[:children].flat_map { |c| extract_types(c, objfilepath, cur) }
+end
+
+def print_types(types)
+  types.each do |t|
+    puts "#{t.name} #{t.size} #{t.sloc}"
+    t.members.each do |m|
+      puts "  #{m.name} @ #{m.offset}"
+    end
+  end
+end
+
+# Given two types (result from extract_types), compare their structure and
+# report conflicts to stdout.
+def check_conflict(t1, t2)
+  raise "incompatible types" if t1.sloc != t2.sloc || t1.name != t2.name
+  conflict = false
+  if t1.size != t2.size
+    puts "CONFLICT #{t1.name} #{t1.sloc}"
+    puts "  SIZE #{t1.size} != #{t2.size}"
+    puts "  OBJ Left  #{t1.objfile}"
+    puts "  OBJ Right #{t2.objfile}"
+    puts
+    conflict = true
+  end
+  if t1.members.size != t2.members.size
+    puts "CONFLICT #{t1.name} #{t1.sloc}"
+    puts "  MEMBER COUNT #{t1.members.size} != #{t2.members.size}"
+    puts "  OBJ Left  #{t1.objfile}"
+    puts "  OBJ Right #{t2.objfile}"
+    puts
+    conflict = true
+  end
+  max_members = [t1.members.size, t2.members.size].max
+  (0...max_members).each do |i|
+    m1 = t1.members[i]
+    m2 = t2.members[i]
+    m1_s = m1 ? "#{m1.type} #{m1.name} @#{m1.offset}" : "nil"
+    m2_s = m2 ? "#{m2.type} #{m2.name} @#{m2.offset}" : "nil"
+    if m1_s != m2_s
+      puts "CONFLICT #{t1.name} #{t1.sloc}"
+      puts "  MEMBER #{m1_s} != #{m2_s}"
+      puts "  OBJ Left  #{t1.objfile}"
+      puts "  OBJ Right #{t2.objfile}"
+      puts
+      conflict = true
+    end
+  end
+  conflict
+end
+
+types_compare = {}
+ARGV.each do |objfilepath|
+  dumptext = run "#{LLVM_DWARFDUMP} --debug-info #{objfilepath}"
+
+  root = parse_debug_dump(dumptext)
+  types = extract_types(root, objfilepath)
+
+  # To tie things together, we iterate over all types from each object file and
+  # build one big hash. If a given type is already present, we check for
+  # conflicts.
+  types.each do |t1|
+    if (t2 = types_compare[[t1.sloc, t1.name]])
+      check_conflict(t1, t2)
+    else
+      types_compare[[t1.sloc, t1.name]] = t1
+    end
+  end
+end
