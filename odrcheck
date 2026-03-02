@@ -83,14 +83,16 @@ def extract_types(root, objfilepath)
   end
 
   all_types = []
-  node_stack = [[root, nil]] # pair(node,current_struct)
+  node_stack = [[root, nil]] # (node,current_struct)
   while !node_stack.empty?
-    node, cur = node_stack.pop
+    node, parent = node_stack.pop
+    cur = nil
     if node[:tag] == "structure_type" || node[:tag] == "class_type"
-      if node["name"] && node["decl_file"] && node["declaration"] != "true"
+      if node["name"] && node["decl_file"] && node["declaration"] != "true" \
+          && !node["name"].start_with?("_") # ignore std
         name = node["name"]
-        if cur
-          name = "#{cur["name"]}::#{node["name"]}" # nested type
+        if parent
+          name = "#{parent["name"]}::#{node["name"]}" # nested type
         end
         cur = OpenStruct.new(
           name: name,
@@ -100,12 +102,10 @@ def extract_types(root, objfilepath)
           members: [],
         )
         all_types << cur
-      else
-        cur = nil # ignore builtin structs / classes
       end
-    elsif node[:tag] == "member" && cur
+    elsif node[:tag] == "member" && parent
       if node["name"] && node["decl_file"] && node["data_member_location"]
-        cur.members << OpenStruct.new(
+        parent.members << OpenStruct.new(
           name: node["name"],
           type: node["type"],
           offset: Integer(node["data_member_location"]),
