@@ -36,15 +36,13 @@ def parse_debug_dump(text)
   cur_indent = 0
   text.lines.each do |line|
     # DW_TAG starts a new node
-    if line =~ /^((0x\h+:)?\s+)DW_TAG_(\w+)/
-      node = {tag: $3, children: []}
+    if line =~ /^(0x\h+:\s+)DW_TAG_(\w+)/
+      node = {tag: $2, children: []}
 
       # indentation determines the nesting level
-      indent = $1.size
-      if indent == cur_indent
-        node_stack.pop
-      elsif indent < cur_indent
-        node_stack.pop 2
+      indent = $1.size / 2 # two spaces
+      if indent <= cur_indent
+        node_stack.pop(cur_indent - indent + 1)
       end
       node_stack.last[:children].push(node)
       node_stack.push(node)
@@ -52,7 +50,8 @@ def parse_debug_dump(text)
 
     # DW_AT adds a new attribute to the current node
     elsif line =~ /^(\s+)DW_AT_(\w+)\s*\((.*)\)/
-      raise "invalid indent" if $1.size <= cur_indent
+      indent = $1.size / 2 # two spaces
+      raise "invalid indent" if indent <= cur_indent
       attr = $2
       value = $3
       if attr == 'type'
