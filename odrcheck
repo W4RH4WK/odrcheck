@@ -131,17 +131,15 @@ def check_conflict(t1, t2)
   conflict = false
   if t1.size != t2.size
     puts "CONFLICT #{t1.name} #{t1.sloc}"
-    puts "  SIZE #{t1.size} != #{t2.size}"
-    puts "  OBJ Left  #{t1.objfile}"
-    puts "  OBJ Right #{t2.objfile}"
+    puts "  #{t1.objfile.ljust(32)} SIZE: #{t1.size}"
+    puts "  #{t2.objfile.ljust(32)} SIZE: #{t2.size}"
     puts
     conflict = true
   end
   if t1.members.size != t2.members.size
     puts "CONFLICT #{t1.name} #{t1.sloc}"
-    puts "  MEMBER COUNT #{t1.members.size} != #{t2.members.size}"
-    puts "  OBJ Left  #{t1.objfile}"
-    puts "  OBJ Right #{t2.objfile}"
+    puts "  #{t1.objfile.ljust(32)} MEMBER COUNT: #{t1.members.size}"
+    puts "  #{t2.objfile.ljust(32)} MEMBER COUNT: #{t2.members.size}"
     puts
     conflict = true
   end
@@ -153,9 +151,8 @@ def check_conflict(t1, t2)
     m2_s = m2 ? "#{m2.type} #{m2.name} @#{m2.offset}" : "nil"
     if m1_s != m2_s
       puts "CONFLICT #{t1.name} #{t1.sloc}"
-      puts "  MEMBER #{m1_s} != #{m2_s}"
-      puts "  OBJ Left  #{t1.objfile}"
-      puts "  OBJ Right #{t2.objfile}"
+      puts "  #{t1.objfile.ljust(32)} MEMBER #{i}: #{m1_s}"
+      puts "  #{t2.objfile.ljust(32)} MEMBER #{i}: #{m2_s}"
       puts
       conflict = true
     end
@@ -166,7 +163,6 @@ end
 types_compare = {}
 ARGV.each do |objfilepath|
   dumptext = run "\"#{LLVM_DWARFDUMP}\" --debug-info #{objfilepath}"
-
   root = parse_debug_dump(dumptext)
   types = extract_types(root, objfilepath)
 
@@ -175,6 +171,7 @@ ARGV.each do |objfilepath|
   # To tie things together, we iterate over all types from each object file and
   # build one big hash. If a given type is already present, we check for
   # conflicts.
+  puts "comparing #{objfilepath}"
   types.each do |t1|
     if (t2 = types_compare[[t1.sloc, t1.name]])
       check_conflict(t1, t2)
