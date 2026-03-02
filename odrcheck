@@ -74,7 +74,7 @@ end
 
 # Traverses the tree obtained from parse_debug_dump and returns a list of type
 # definitions.
-def extract_types(node, objfilepath, cur=nil)
+def extract_types(root, objfilepath)
   def make_sloc(node)
     file = node["decl_file"]
     line = node["decl_line"]
@@ -83,29 +83,36 @@ def extract_types(node, objfilepath, cur=nil)
     "#{Pathname(file).cleanpath}:#{line}"
   end
 
-  types = []
-  if node[:tag] == "structure_type" || node[:tag] == "class_type"
-    if node["name"] && node["decl_file"] && node["declaration"] != "true"
-      cur = OpenStruct.new(
-        name: node["name"],
-        size: Integer(node["byte_size"]),
-        sloc: make_sloc(node),
-        objfile: objfilepath,
-        members: [],
-      )
-      types << cur
+  all_types = []
+  node_stack = [[root, nil]] # pair(node,current_struct)
+  while !node_stack.empty?
+    node, cur = node_stack.pop
+    if node[:tag] == "structure_type" || node[:tag] == "class_type"
+      if node["name"] && node["decl_file"] && node["declaration"] != "true"
+        cur = OpenStruct.new(
+          name: node["name"],
+          size: Integer(node["byte_size"]),
+          sloc: make_sloc(node),
+          objfile: objfilepath,
+          members: [],
+        )
+        all_types << cur
+      else
+        cur = nil # ignore builtin structs / classes
+      end
+    elsif node[:tag] == "member" && cur
+      if node["name"] && node["decl_file"] && node["data_member_location"]
+        cur.members << OpenStruct.new(
+          name: node["name"],
+          type: node["type"],
+          offset: Integer(node["data_member_location"]),
+          sloc: make_sloc(node),
+        )
+      end
     end
-  elsif node[:tag] == "member"
-    if node["name"] && node["decl_file"] && node["data_member_location"]
-      cur.members << OpenStruct.new(
-        name: node["name"],
-        type: node["type"],
-        offset: Integer(node["data_member_location"]),
-        sloc: make_sloc(node),
-      )
-    end
+    node[:children].reverse_each { |child| node_stack << [child, cur] }
   end
-  types + node[:children].flat_map { |c| extract_types(c, objfilepath, cur) }
+  all_types
 end
 
 def print_types(types)
@@ -162,6 +169,8 @@ ARGV.each do |objfilepath|
 
   root = parse_debug_dump(dumptext)
   types = extract_types(root, objfilepath)
+
+  #print_types(types)
 
   # To tie things together, we iterate over all types from each object file and
   # build one big hash. If a given type is already present, we check for
