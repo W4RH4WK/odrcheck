@@ -158,7 +158,7 @@ end
 
 types_compare = {}
 ARGV.each do |objfilepath|
-  dumptext = run "#{LLVM_DWARFDUMP} --debug-info #{objfilepath}"
+  dumptext = run "\"#{LLVM_DWARFDUMP}\" --debug-info #{objfilepath}"
 
   root = parse_debug_dump(dumptext)
   types = extract_types(root, objfilepath)
